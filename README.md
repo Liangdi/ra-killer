@@ -28,11 +28,21 @@
 
 ## 📦 安装
 
+### 使用 cargo install（推荐）
+
+```bash
+# 从 crates.io 安装
+cargo install ra-killer
+
+# 或指定特定版本
+cargo install ra-killer --version 0.2.3
+```
+
 ### 从源码编译
 
 ```bash
 # 克隆仓库
-git clone <repository-url>
+git clone https://github.com/Liangdi/ra-killer
 cd ra-killer
 
 # 编译 release 版本
@@ -117,6 +127,8 @@ ra-killer --verbose
 ra-killer --tui
 ```
 
+![TUI 界面](screenshot/tui.png)
+
 **TUI 界面功能：**
 
 - **实时监控** - 显示系统内存使用率和进度条
@@ -146,15 +158,9 @@ ra-killer --tui
 
 ## 📊 输出示例
 
-```
-2026-04-01T09:36:57.791668Z  INFO ra_killer: 🚀 ra-killer 启动
-2026-04-01T09:36:57.791683Z  INFO ra_killer: 📊 内存阈值: 85%
-2026-04-01T09:36:57.791685Z  INFO ra_killer: ⏱️  检查间隔: 20 秒
-2026-04-01T09:36:57.791686Z  INFO ra_killer: 🎯 目标进程: rust-analyzer
-2026-04-01T09:36:57.887637Z  INFO ra_killer: 💾 内存使用: 20.77 GB / 31.06 GB (66%)
-2026-04-01T09:36:57.887673Z  INFO ra_killer:   📋 rust-analyzer 进程: PID=32918, 内存=1.07 GB
-2026-04-01T09:36:57.887697Z  INFO ra_killer:   📋 rust-analyzer 进程: PID=8157, 内存=2.42 GB
-```
+### 命令行模式
+
+![命令行输出示例](screenshot/output.png)
 
 当内存超过阈值时：
 ```

@@ -1,7 +1,15 @@
 [package]
 name = "ra-killer"
 version = "0.2.3"
-edition = "2024"
+edition = "2021"
+authors = ["Liangdi <wu@liangdi.me>"]
+description = "Automatically monitor and kill high-memory rust-analyzer processes"
+license = "MIT"
+repository = "https://github.com/Liangdi/ra-killer"
+homepage = "https://github.com/Liangdi/ra-killer"
+keywords = ["rust-analyzer", "memory", "monitor", "process", "killer"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.102"
