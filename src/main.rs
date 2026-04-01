@@ -579,7 +579,8 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .block(
             Block::default()
                 .title(format!(
-                    "进程列表 ({} 个)",
+                    "进程列表 - {} ({} 个)",
+                    app.process_name,
                     app.processes.len()
                 ))
                 .borders(Borders::ALL),
