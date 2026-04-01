@@ -14,7 +14,7 @@ struct Args {
     threshold: u8,
 
     /// 检查间隔 (秒)
-    #[arg(short, long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(5..3600))]
+    #[arg(short, long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(5..3600))]
     interval: u64,
 
     /// 目标进程名
@@ -127,7 +127,7 @@ fn find_and_kill_target_process(sys: &System, target_name: &str) -> Option<usize
                 "🔍 找到 {} 进程: PID={}, 内存={}",
                 target_name,
                 pid,
-                format_bytes(memory_usage * 1024)
+                format_bytes(memory_usage)
             );
 
             // 尝试优雅地终止进程
@@ -158,7 +158,7 @@ fn show_target_processes(sys: &System, target_name: &str) {
                 "  📋 {} 进程: PID={}, 内存={}",
                 target_name,
                 pid,
-                format_bytes(memory_usage * 1024)
+                format_bytes(memory_usage)
             );
             found = true;
         }
