@@ -383,8 +383,9 @@ impl App {
     }
 
     fn refresh_processes(&mut self) {
-        // 刷新系统信息
-        self.sys.refresh_all();
+        // 重新创建 System 对象以获取最新的进程状态
+        // refresh_all() 可能保留已死进程的缓存信息
+        self.sys = System::new_all();
 
         // 清空进程列表
         self.processes.clear();
