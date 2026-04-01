@@ -115,15 +115,15 @@ async fn run_tui(args: Args) -> Result<()> {
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Enter => {
                                 if index == usize::MAX {
-                                    // 杀死所有
-                                    let count = app.processes.len();
-                                    for proc in &app.processes {
-                                        let _ = kill_process(proc.pid);
+                                    // 杀死内存使用最高的 40% 进程
+                                    match app.kill_top_memory_processes(40) {
+                                        Ok(killed) => {
+                                            app.set_message(format!("✅ 已终止 {} 个进程（内存最高的 40%）", killed));
+                                        }
+                                        Err(e) => {
+                                            app.set_message(format!("❌ 终止进程失败: {}", e));
+                                        }
                                     }
-                                    app.set_message(format!("✅ 已终止 {} 个进程", count));
-                                    // 立即清空进程列表，给用户即时反馈
-                                    app.processes.clear();
-                                    app.selected_index = 0;
                                 } else {
                                     let _ = app.kill_selected_process();
                                 }
@@ -431,6 +431,43 @@ impl App {
         Ok(())
     }
 
+    fn kill_top_memory_processes(&mut self, percentage: u8) -> Result<usize> {
+        if self.processes.is_empty() {
+            return Ok(0);
+        }
+
+        // 按内存使用排序（从高到低）
+        let mut sorted_processes: Vec<_> = self.processes.iter().enumerate().collect();
+        sorted_processes.sort_by(|a, b| b.1.memory.cmp(&a.1.memory));
+
+        // 计算要杀死的进程数量（40%，向上取整）
+        let total = self.processes.len();
+        let kill_count = (total as f64 * percentage as f64 / 100.0).ceil() as usize;
+
+        // 杀死内存最高的进程
+        let mut killed = 0;
+        let mut killed_pids = Vec::new();
+
+        for (_idx, proc_info) in sorted_processes.iter().take(kill_count) {
+            if let Err(e) = kill_process(proc_info.pid) {
+                eprintln!("Failed to kill process {}: {}", proc_info.pid, e);
+            } else {
+                killed_pids.push(proc_info.pid);
+                killed += 1;
+            }
+        }
+
+        // 从进程列表中移除已杀死的进程
+        self.processes.retain(|p| !killed_pids.contains(&p.pid));
+
+        // 调整选中索引
+        if self.selected_index >= self.processes.len() && !self.processes.is_empty() {
+            self.selected_index = self.processes.len() - 1;
+        }
+
+        Ok(killed)
+    }
+
     fn set_message(&mut self, msg: String) {
         self.message = Some(msg);
         self.message_time = Some(std::time::Instant::now());
@@ -600,16 +637,23 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                 Span::styled("Enter", Style::default().fg(Color::Cyan)),
                 Span::raw(" 杀死选中 "),
                 Span::styled("a", Style::default().fg(Color::Cyan)),
-                Span::raw(" 杀死全部 "),
+                Span::raw(" 清理高内存(40%) "),
                 Span::styled("r", Style::default().fg(Color::Cyan)),
                 Span::raw(" 刷新 "),
                 Span::styled("q", Style::default().fg(Color::Cyan)),
                 Span::raw(" 退出"),
             ]),
         ],
-        AppState::ConfirmKill(_) => vec![
+        AppState::ConfirmKill(index) => vec![
             Line::from(vec![
-                Span::styled("确认杀死进程? ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    if index == usize::MAX {
+                        "确认清理内存最高的 40% 进程? "
+                    } else {
+                        "确认杀死选中进程? "
+                    },
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                ),
                 Span::styled("y", Style::default().fg(Color::Green)),
                 Span::raw(" 是 "),
                 Span::styled("n", Style::default().fg(Color::Red)),
