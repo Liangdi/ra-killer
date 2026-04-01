@@ -1,0 +1,22 @@
+[Unit]
+Description=RA Killer - Auto kill rust-analyzer when memory is high
+After=network.target
+
+[Service]
+Type=simple
+User=liangdi
+ExecStart=/usr/local/bin/ra-killer
+Restart=always
+RestartSec=10
+
+# 日志配置
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ra-killer
+
+# 安全配置
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
