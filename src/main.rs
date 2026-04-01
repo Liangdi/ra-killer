@@ -68,6 +68,9 @@ async fn run_tui(args: Args) -> Result<()> {
 
     // 处理事件
     while !app.should_quit {
+        // 清理过期消息
+        app.clear_expired_message();
+
         // 绘制界面
         terminal.draw(|f| draw_ui(f, &app))?;
 
@@ -97,7 +100,7 @@ async fn run_tui(args: Args) -> Result<()> {
                             }
                             KeyCode::Char('r') => {
                                 app.refresh_processes();
-                                app.message = Some("🔄 已刷新".to_string());
+                                app.set_message("🔄 已刷新".to_string());
                             }
                             KeyCode::Char('a') => {
                                 // 杀死所有进程
@@ -117,7 +120,10 @@ async fn run_tui(args: Args) -> Result<()> {
                                     for proc in &app.processes {
                                         let _ = kill_process(proc.pid);
                                     }
-                                    app.message = Some(format!("✅ 已终止 {} 个进程", count));
+                                    app.set_message(format!("✅ 已终止 {} 个进程", count));
+                                    // 立即清空进程列表，给用户即时反馈
+                                    app.processes.clear();
+                                    app.selected_index = 0;
                                 } else {
                                     let _ = app.kill_selected_process();
                                 }
@@ -352,6 +358,7 @@ struct App {
     should_quit: bool,
     last_refresh: std::time::Instant,
     message: Option<String>,
+    message_time: Option<std::time::Instant>,
 }
 
 impl App {
@@ -369,15 +376,20 @@ impl App {
             should_quit: false,
             last_refresh: std::time::Instant::now(),
             message: None,
+            message_time: None,
         };
         app.refresh_processes();
         app
     }
 
     fn refresh_processes(&mut self) {
+        // 刷新系统信息
         self.sys.refresh_all();
+
+        // 清空进程列表
         self.processes.clear();
 
+        // 重新获取进程列表
         for (pid, process) in self.sys.processes() {
             if process.name().to_string_lossy().contains(&self.process_name) {
                 self.processes.push(ProcessInfo {
@@ -388,6 +400,7 @@ impl App {
             }
         }
 
+        // 调整选中索引
         if self.selected_index >= self.processes.len() && !self.processes.is_empty() {
             self.selected_index = self.processes.len() - 1;
         }
@@ -411,10 +424,24 @@ impl App {
         if self.selected_index < self.processes.len() {
             let pid = self.processes[self.selected_index].pid;
             kill_process(pid)?;
-            self.message = Some(format!("✅ 已终止进程 {}", pid));
+            self.set_message(format!("✅ 已终止进程 {}", pid));
             self.refresh_processes();
         }
         Ok(())
+    }
+
+    fn set_message(&mut self, msg: String) {
+        self.message = Some(msg);
+        self.message_time = Some(std::time::Instant::now());
+    }
+
+    fn clear_expired_message(&mut self) {
+        if let Some(msg_time) = self.message_time {
+            if msg_time.elapsed() >= std::time::Duration::from_secs(3) {
+                self.message = None;
+                self.message_time = None;
+            }
+        }
     }
 }
 
