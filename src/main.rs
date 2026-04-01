@@ -1,5 +1,19 @@
 use anyhow::Result;
 use clap::Parser;
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, Wrap},
+    Terminal,
+};
+use std::io;
 use std::time::Duration;
 use sysinfo::System;
 use tokio::time::interval;
@@ -25,9 +39,117 @@ struct Args {
     #[arg(long)]
     once: bool,
 
+    /// 启用 TUI 模式
+    #[arg(long)]
+    tui: bool,
+
     /// 详细日志
     #[arg(long)]
     verbose: bool,
+}
+
+#[derive(Clone, Copy)]
+enum AppState {
+    Normal,
+    ConfirmKill(usize),
+}
+
+/// 运行 TUI 界面
+async fn run_tui(args: Args) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut app = App::new(args.threshold, args.interval, args.process.clone());
+    let mut last_tick = std::time::Instant::now();
+    let tick_rate = Duration::from_millis(250);
+
+    // 处理事件
+    while !app.should_quit {
+        // 绘制界面
+        terminal.draw(|f| draw_ui(f, &app))?;
+
+        // 处理输入
+        if event::poll(tick_rate)? {
+            if let Event::Key(key) = event::read()? {
+                match app.state {
+                    AppState::Normal => {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                app.should_quit = true;
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if app.selected_index < app.processes.len().saturating_sub(1) {
+                                    app.selected_index += 1;
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if app.selected_index > 0 {
+                                    app.selected_index -= 1;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if !app.processes.is_empty() {
+                                    app.state = AppState::ConfirmKill(app.selected_index);
+                                }
+                            }
+                            KeyCode::Char('r') => {
+                                app.refresh_processes();
+                                app.message = Some("🔄 已刷新".to_string());
+                            }
+                            KeyCode::Char('a') => {
+                                // 杀死所有进程
+                                if !app.processes.is_empty() {
+                                    app.state = AppState::ConfirmKill(usize::MAX);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    AppState::ConfirmKill(index) => {
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Enter => {
+                                if index == usize::MAX {
+                                    // 杀死所有
+                                    let count = app.processes.len();
+                                    for proc in &app.processes {
+                                        let _ = kill_process(proc.pid);
+                                    }
+                                    app.message = Some(format!("✅ 已终止 {} 个进程", count));
+                                } else {
+                                    let _ = app.kill_selected_process();
+                                }
+                                app.state = AppState::Normal;
+                            }
+                            KeyCode::Char('n') | KeyCode::Esc => {
+                                app.state = AppState::Normal;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // 自动刷新
+        if last_tick.elapsed() >= Duration::from_secs(args.interval) {
+            app.refresh_processes();
+            last_tick = std::time::Instant::now();
+        }
+    }
+
+    // 恢复终端
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -41,8 +163,16 @@ async fn main() -> Result<()> {
         tracing::Level::INFO
     };
 
-    tracing_subscriber::fmt().with_max_level(log_level).init();
+    if !args.tui {
+        tracing_subscriber::fmt().with_max_level(log_level).init();
+    }
 
+    if args.tui {
+        // TUI 模式
+        return run_tui(args).await;
+    }
+
+    // CLI 模式
     info!("🚀 ra-killer 启动");
     info!("📊 内存阈值: {}%", args.threshold);
     info!("⏱️  检查间隔: {} 秒", args.interval);
@@ -200,5 +330,282 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// 进程信息结构
+struct ProcessInfo {
+    pid: u32,
+    memory: u64,
+    cpu: f32,
+}
+
+/// TUI 应用状态
+struct App {
+    sys: System,
+    threshold: u8,
+    interval: u64,
+    process_name: String,
+    selected_index: usize,
+    processes: Vec<ProcessInfo>,
+    state: AppState,
+    should_quit: bool,
+    last_refresh: std::time::Instant,
+    message: Option<String>,
+}
+
+impl App {
+    fn new(threshold: u8, interval: u64, process_name: String) -> Self {
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        let mut app = Self {
+            sys,
+            threshold,
+            interval,
+            process_name,
+            selected_index: 0,
+            processes: Vec::new(),
+            state: AppState::Normal,
+            should_quit: false,
+            last_refresh: std::time::Instant::now(),
+            message: None,
+        };
+        app.refresh_processes();
+        app
+    }
+
+    fn refresh_processes(&mut self) {
+        self.sys.refresh_all();
+        self.processes.clear();
+
+        for (pid, process) in self.sys.processes() {
+            if process.name().to_string_lossy().contains(&self.process_name) {
+                self.processes.push(ProcessInfo {
+                    pid: pid.as_u32(),
+                    memory: process.memory(),
+                    cpu: process.cpu_usage(),
+                });
+            }
+        }
+
+        if self.selected_index >= self.processes.len() && !self.processes.is_empty() {
+            self.selected_index = self.processes.len() - 1;
+        }
+
+        self.last_refresh = std::time::Instant::now();
+    }
+
+    fn total_memory(&self) -> u64 {
+        self.sys.total_memory()
+    }
+
+    fn used_memory(&self) -> u64 {
+        self.sys.used_memory()
+    }
+
+    fn memory_percent(&self) -> f64 {
+        (self.used_memory() as f64 / self.total_memory() as f64) * 100.0
+    }
+
+    fn kill_selected_process(&mut self) -> Result<()> {
+        if self.selected_index < self.processes.len() {
+            let pid = self.processes[self.selected_index].pid;
+            kill_process(pid)?;
+            self.message = Some(format!("✅ 已终止进程 {}", pid));
+            self.refresh_processes();
+        }
+        Ok(())
+    }
+}
+
+/// 绘制 UI
+fn draw_ui(f: &mut ratatui::Frame, app: &App) {
+    let size = f.area();
+
+    // 主布局
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints(
+            [
+                Constraint::Length(3),  // 标题
+                Constraint::Length(8),  // 系统信息
+                Constraint::Min(0),     // 进程列表
+                Constraint::Length(3),  // 帮助信息
+            ]
+            .as_ref(),
+        )
+        .split(size);
+
+    // 标题
+    let title = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                "🔫 ra-killer ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "目标进程: ",
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                &app.process_name,
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ])
+    .block(Block::default().borders(Borders::ALL))
+    .alignment(Alignment::Center);
+    f.render_widget(title, chunks[0]);
+
+    // 系统信息
+    let memory_percent = app.memory_percent();
+    let gauge_color = if memory_percent >= app.threshold as f64 {
+        Color::Red
+    } else if memory_percent >= app.threshold as f64 * 0.8 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    let system_info = vec![
+        Line::from(vec![
+            Span::styled("💾 内存使用: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{} / {}", format_bytes(app.used_memory()), format_bytes(app.total_memory())),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("📊 使用率: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:.1}%", memory_percent),
+                Style::default().fg(gauge_color).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("⚠️  阈值: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{}%", app.threshold),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("🔄 刷新间隔: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{} 秒", app.interval),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+    ];
+
+    let gauge = Gauge::default()
+        .block(Block::default().title("系统状态").borders(Borders::ALL))
+        .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
+        .percent(memory_percent as u16)
+        .label(format!("{:.1}%", memory_percent));
+
+    let sys_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[1]);
+
+    let sys_info = Paragraph::new(system_info)
+        .block(Block::default().title("系统信息").borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    f.render_widget(sys_info, sys_chunks[0]);
+    f.render_widget(gauge, sys_chunks[1]);
+
+    // 进程列表
+    let rows: Vec<Row> = app
+        .processes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let style = if i == app.selected_index {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(format!("{}", p.pid)),
+                Cell::from(format!("{:.1}%", p.cpu)),
+                Cell::from(format_bytes(p.memory)),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let table = Table::new(rows, [Constraint::Length(8), Constraint::Length(8), Constraint::Min(0)])
+        .header(Row::new(vec![
+            Cell::from("PID").style(Style::default().fg(Color::Cyan)),
+            Cell::from("CPU").style(Style::default().fg(Color::Cyan)),
+            Cell::from("内存").style(Style::default().fg(Color::Cyan)),
+        ]))
+        .block(
+            Block::default()
+                .title(format!(
+                    "进程列表 ({} 个)",
+                    app.processes.len()
+                ))
+                .borders(Borders::ALL),
+        )
+        .widths(&[Constraint::Length(8), Constraint::Length(8), Constraint::Min(0)]);
+
+    f.render_widget(table, chunks[2]);
+
+    // 帮助信息
+    let help_text = match app.state {
+        AppState::Normal => vec![
+            Line::from(vec![
+                Span::styled("↑/j", Style::default().fg(Color::Cyan)),
+                Span::raw(" 上 "),
+                Span::styled("↓/k", Style::default().fg(Color::Cyan)),
+                Span::raw(" 下 "),
+                Span::styled("Enter", Style::default().fg(Color::Cyan)),
+                Span::raw(" 杀死选中 "),
+                Span::styled("a", Style::default().fg(Color::Cyan)),
+                Span::raw(" 杀死全部 "),
+                Span::styled("r", Style::default().fg(Color::Cyan)),
+                Span::raw(" 刷新 "),
+                Span::styled("q", Style::default().fg(Color::Cyan)),
+                Span::raw(" 退出"),
+            ]),
+        ],
+        AppState::ConfirmKill(_) => vec![
+            Line::from(vec![
+                Span::styled("确认杀死进程? ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled("y", Style::default().fg(Color::Green)),
+                Span::raw(" 是 "),
+                Span::styled("n", Style::default().fg(Color::Red)),
+                Span::raw(" 否"),
+            ]),
+        ],
+    };
+
+    let help = Paragraph::new(help_text)
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center);
+    f.render_widget(help, chunks[3]);
+
+    // 显示消息
+    if let Some(ref msg) = app.message {
+        let msg_paragraph = Paragraph::new(msg.as_str())
+            .block(Block::default())
+            .alignment(Alignment::Center);
+        let msg_area = Rect {
+            x: size.x + size.width / 4,
+            y: size.y + size.height / 2,
+            width: size.width / 2,
+            height: 3,
+        };
+        f.render_widget(Clear, msg_area);
+        f.render_widget(msg_paragraph, msg_area);
     }
 }
