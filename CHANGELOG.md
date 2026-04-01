@@ -1,3 +1,8 @@
+## [0.2.3] - 2026-04-01
+
+### 🚀 Features
+
+- 优化内存清理策略，只杀死内存最高的 40% 进程
 ## [0.2.2] - 2026-04-01
 
 ### 🚀 Features
@@ -9,6 +14,10 @@
 
 - 修复 TUI 模式下的多个问题
 - 修复刷新后显示已死进程的问题
+
+### ⚙️ Miscellaneous Tasks
+
+- Release ra-killer version 0.2.2
 ## [0.2.1] - 2026-04-01
 
 ### ⚙️ Miscellaneous Tasks
