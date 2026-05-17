@@ -142,6 +142,15 @@ async fn run_tui(args: Args) -> Result<()> {
         // 自动刷新
         if last_tick.elapsed() >= Duration::from_secs(args.interval) {
             app.refresh_processes();
+            // 自动阈值检测 + 杀进程（和 CLI 一致）
+            if app.memory_percent() >= app.threshold as f64 {
+                match app.auto_kill_high_memory() {
+                    Ok(killed) if killed > 0 => {
+                        app.set_message(format!("已自动终止 {} 个高内存进程", killed));
+                    }
+                    _ => {}
+                }
+            }
             last_tick = std::time::Instant::now();
         }
     }
@@ -342,6 +351,7 @@ fn format_bytes(bytes: u64) -> String {
 /// 进程信息结构
 struct ProcessInfo {
     pid: u32,
+    name: String,
     memory: u64,
     cpu: f32,
 }
@@ -383,18 +393,19 @@ impl App {
     }
 
     fn refresh_processes(&mut self) {
-        // 重新创建 System 对象以获取最新的进程状态
-        // refresh_all() 可能保留已死进程的缓存信息
-        self.sys = System::new_all();
+        // 使用 refresh_all 而非 new_all，保持 CPU 采样的连续性
+        self.sys.refresh_all();
 
         // 清空进程列表
         self.processes.clear();
 
         // 重新获取进程列表
         for (pid, process) in self.sys.processes() {
-            if process.name().to_string_lossy().contains(&self.process_name) {
+            let name = process.name().to_string_lossy().to_string();
+            if name.contains(&self.process_name) {
                 self.processes.push(ProcessInfo {
                     pid: pid.as_u32(),
+                    name,
                     memory: process.memory(),
                     cpu: process.cpu_usage(),
                 });
@@ -419,6 +430,10 @@ impl App {
 
     fn memory_percent(&self) -> f64 {
         (self.used_memory() as f64 / self.total_memory() as f64) * 100.0
+    }
+
+    fn auto_kill_high_memory(&mut self) -> Result<usize> {
+        self.kill_top_memory_processes(40)
     }
 
     fn kill_selected_process(&mut self) -> Result<()> {
@@ -494,7 +509,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .constraints(
             [
                 Constraint::Length(3),  // 标题
-                Constraint::Length(8),  // 系统信息
+                Constraint::Length(9),  // 系统信息
                 Constraint::Min(0),     // 进程列表
                 Constraint::Length(3),  // 帮助信息
             ]
@@ -568,6 +583,13 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                 Style::default().fg(Color::Gray),
             ),
         ]),
+        Line::from(vec![
+            Span::styled("🤖 自动清理: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "开启 (杀内存最高 40%)",
+                Style::default().fg(Color::Green),
+            ),
+        ]),
     ];
 
     let gauge = Gauge::default()
@@ -600,6 +622,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
             };
             Row::new(vec![
                 Cell::from(format!("{}", p.pid)),
+                Cell::from(p.name.as_str()),
                 Cell::from(format!("{:.1}%", p.cpu)),
                 Cell::from(format_bytes(p.memory)),
             ])
@@ -607,9 +630,10 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         })
         .collect();
 
-    let table = Table::new(rows, [Constraint::Length(8), Constraint::Length(8), Constraint::Min(0)])
+    let table = Table::new(rows, [Constraint::Length(8), Constraint::Min(10), Constraint::Length(8), Constraint::Min(0)])
         .header(Row::new(vec![
             Cell::from("PID").style(Style::default().fg(Color::Cyan)),
+            Cell::from("进程名").style(Style::default().fg(Color::Cyan)),
             Cell::from("CPU").style(Style::default().fg(Color::Cyan)),
             Cell::from("内存").style(Style::default().fg(Color::Cyan)),
         ]))
@@ -622,7 +646,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                 ))
                 .borders(Borders::ALL),
         )
-        .widths(&[Constraint::Length(8), Constraint::Length(8), Constraint::Min(0)]);
+        .widths(&[Constraint::Length(8), Constraint::Min(10), Constraint::Length(8), Constraint::Min(0)]);
 
     f.render_widget(table, chunks[2]);
 
