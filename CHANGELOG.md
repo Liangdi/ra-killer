@@ -1,8 +1,21 @@
+## [0.2.4] - 2026-05-17
+
+### 🚀 Features
+
+- TUI 模式自动检测内存阈值并杀进程
+
+### ⚙️ Miscellaneous Tasks
+
+- 准备发布到 crates.io
 ## [0.2.3] - 2026-04-01
 
 ### 🚀 Features
 
 - 优化内存清理策略，只杀死内存最高的 40% 进程
+
+### ⚙️ Miscellaneous Tasks
+
+- Release ra-killer version 0.2.3
 ## [0.2.2] - 2026-04-01
 
 ### 🚀 Features
