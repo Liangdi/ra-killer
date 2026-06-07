@@ -1,3 +1,12 @@
+## [0.3.0] - 2026-06-07
+
+### 🚀 Features
+
+- 添加 i18n 国际化支持（默认中文，支持英文）
+
+### 🐛 Bug Fixes
+
+- 修复多个 bug 并优化性能
 ## [0.2.4] - 2026-05-17
 
 ### 🚀 Features
@@ -7,6 +16,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - 准备发布到 crates.io
+- Release ra-killer version 0.2.4
 ## [0.2.3] - 2026-04-01
 
 ### 🚀 Features

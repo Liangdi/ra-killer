@@ -1,6 +1,6 @@
 [package]
 name = "ra-killer"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
 authors = ["Liangdi <wu@liangdi.me>"]
 description = "Automatically monitor and kill high-memory rust-analyzer processes"
