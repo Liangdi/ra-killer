@@ -54,11 +54,26 @@ enum AppState {
     ConfirmKill(usize),
 }
 
+/// RAII 守卫，确保终端始终恢复到正常状态
+struct TuiGuard;
+
+impl Drop for TuiGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
+    }
+}
+
 /// 运行 TUI 界面
 async fn run_tui(args: Args) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let _guard = TuiGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -147,6 +162,8 @@ async fn run_tui(args: Args) -> Result<()> {
                 match app.auto_kill_high_memory() {
                     Ok(killed) if killed > 0 => {
                         app.set_message(format!("已自动终止 {} 个高内存进程", killed));
+                        // 刷新系统内存数据，使 Gauge 立即反映变化
+                        app.refresh_processes();
                     }
                     _ => {}
                 }
@@ -211,25 +228,30 @@ async fn main() -> Result<()> {
 }
 
 fn run_check(sys: &mut System, args: &Args) {
-    // 刷新系统信息
-    sys.refresh_all();
+    // 刷新系统信息（只刷新内存和进程，跳过 CPU/磁盘/网络等不需要的数据）
+    sys.refresh_memory();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
     // 检查内存使用情况
     let total_memory = sys.total_memory();
     let used_memory = sys.used_memory();
-    let memory_usage_percent = (used_memory as f64 / total_memory as f64 * 100.0) as u8;
+    let memory_usage_percent = if total_memory == 0 {
+        0.0
+    } else {
+        used_memory as f64 / total_memory as f64 * 100.0
+    };
 
     info!(
-        "💾 内存使用: {} / {} ({}%)",
+        "💾 内存使用: {} / {} ({:.1}%)",
         format_bytes(used_memory),
         format_bytes(total_memory),
         memory_usage_percent
     );
 
     // 如果内存超过阈值，查找并杀死目标进程
-    if memory_usage_percent >= args.threshold {
+    if memory_usage_percent >= args.threshold as f64 {
         warn!(
-            "⚠️  内存使用率 {}% 超过阈值 {}%",
+            "⚠️  内存使用率 {:.1}% 超过阈值 {}%",
             memory_usage_percent, args.threshold
         );
 
@@ -254,34 +276,41 @@ fn run_check(sys: &mut System, args: &Args) {
     }
 }
 
+/// 查找匹配目标名称的进程，返回 (pid, 进程引用) 的迭代器
+fn find_matching_processes<'a>(
+    sys: &'a System,
+    target_name: &str,
+) -> Vec<(sysinfo::Pid, &'a sysinfo::Process)> {
+    sys.processes()
+        .iter()
+        .filter(|(_, process)| {
+            process.name().to_string_lossy().contains(target_name)
+        })
+        .map(|(pid, process)| (*pid, process))
+        .collect()
+}
+
 /// 查找并杀死目标进程
 /// 返回 Some(成功杀死的进程数) 或 None(出错)
 fn find_and_kill_target_process(sys: &System, target_name: &str) -> Option<usize> {
     let mut killed_count = 0;
 
-    for (pid, process) in sys.processes() {
-        if process
-            .name()
-            .to_string_lossy()
-            .contains(target_name)
-        {
-            let memory_usage = process.memory();
-            let pid = pid.as_u32();
+    for (pid, process) in find_matching_processes(sys, target_name) {
+        let memory_usage = process.memory();
+        let pid_u32 = pid.as_u32();
 
-            info!(
-                "🔍 找到 {} 进程: PID={}, 内存={}",
-                target_name,
-                pid,
-                format_bytes(memory_usage)
-            );
+        info!(
+            "🔍 找到 {} 进程: PID={}, 内存={}",
+            target_name,
+            pid_u32,
+            format_bytes(memory_usage)
+        );
 
-            // 尝试优雅地终止进程
-            if let Err(e) = kill_process(pid) {
-                warn!("⚠️  无法终止进程 {}: {}", pid, e);
-            } else {
-                info!("✅ 已终止进程 {}", pid);
-                killed_count += 1;
-            }
+        if let Err(e) = kill_process(pid_u32) {
+            warn!("⚠️  无法终止进程 {}: {}", pid_u32, e);
+        } else {
+            info!("✅ 已终止进程 {}", pid_u32);
+            killed_count += 1;
         }
     }
 
@@ -291,22 +320,16 @@ fn find_and_kill_target_process(sys: &System, target_name: &str) -> Option<usize
 /// 显示目标进程的内存使用情况
 fn show_target_processes(sys: &System, target_name: &str) {
     let mut found = false;
-    for (pid, process) in sys.processes() {
-        if process
-            .name()
-            .to_string_lossy()
-            .contains(target_name)
-        {
-            let memory_usage = process.memory();
-            let pid = pid.as_u32();
-            info!(
-                "  📋 {} 进程: PID={}, 内存={}",
-                target_name,
-                pid,
-                format_bytes(memory_usage)
-            );
-            found = true;
-        }
+    for (pid, process) in find_matching_processes(sys, target_name) {
+        let memory_usage = process.memory();
+        let pid_u32 = pid.as_u32();
+        info!(
+            "  📋 {} 进程: PID={}, 内存={}",
+            target_name,
+            pid_u32,
+            format_bytes(memory_usage)
+        );
+        found = true;
     }
 
     if found {
@@ -314,9 +337,11 @@ fn show_target_processes(sys: &System, target_name: &str) {
     }
 }
 
-/// 终止指定进程
+/// 终止指定进程（先 SIGTERM，等待后 SIGKILL 降级）
 fn kill_process(pid: u32) -> Result<()> {
     use std::process::Command;
+    use std::thread;
+    use std::time::Duration;
 
     // 使用 SIGTERM 优雅地终止进程
     let output = Command::new("kill")
@@ -326,6 +351,29 @@ fn kill_process(pid: u32) -> Result<()> {
 
     if !output.status.success() {
         anyhow::bail!("kill 命令失败: {:?}", output.status);
+    }
+
+    // 等待进程退出
+    thread::sleep(Duration::from_millis(500));
+
+    // 检查进程是否仍然存在
+    let check = Command::new("kill")
+        .arg("-0")  // kill -0 只检查进程是否存在
+        .arg(pid.to_string())
+        .output();
+
+    if let Ok(output) = check {
+        if output.status.success() {
+            // 进程仍然存在，升级为 SIGKILL
+            warn!("⚠️  进程 {} 未响应 SIGTERM，使用 SIGKILL", pid);
+            let kill_output = Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output()?;
+            if !kill_output.status.success() {
+                anyhow::bail!("SIGKILL 失败: {:?}", kill_output.status);
+            }
+        }
     }
 
     Ok(())
@@ -374,7 +422,8 @@ struct App {
 impl App {
     fn new(threshold: u8, interval: u64, process_name: String) -> Self {
         let mut sys = System::new_all();
-        sys.refresh_all();
+        sys.refresh_memory();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         let mut app = Self {
             sys,
             threshold,
@@ -393,23 +442,21 @@ impl App {
     }
 
     fn refresh_processes(&mut self) {
-        // 使用 refresh_all 而非 new_all，保持 CPU 采样的连续性
-        self.sys.refresh_all();
+        // 只刷新内存和进程，保持 CPU 采样的连续性，跳过不需要的 CPU/磁盘/网络数据
+        self.sys.refresh_memory();
+        self.sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
         // 清空进程列表
         self.processes.clear();
 
         // 重新获取进程列表
-        for (pid, process) in self.sys.processes() {
-            let name = process.name().to_string_lossy().to_string();
-            if name.contains(&self.process_name) {
-                self.processes.push(ProcessInfo {
-                    pid: pid.as_u32(),
-                    name,
-                    memory: process.memory(),
-                    cpu: process.cpu_usage(),
-                });
-            }
+        for (pid, process) in find_matching_processes(&self.sys, &self.process_name) {
+            self.processes.push(ProcessInfo {
+                pid: pid.as_u32(),
+                name: process.name().to_string_lossy().to_string(),
+                memory: process.memory(),
+                cpu: process.cpu_usage(),
+            });
         }
 
         // 调整选中索引
@@ -429,7 +476,12 @@ impl App {
     }
 
     fn memory_percent(&self) -> f64 {
-        (self.used_memory() as f64 / self.total_memory() as f64) * 100.0
+        let total = self.total_memory();
+        if total == 0 {
+            0.0
+        } else {
+            (self.used_memory() as f64 / total as f64) * 100.0
+        }
     }
 
     fn auto_kill_high_memory(&mut self) -> Result<usize> {
@@ -461,13 +513,13 @@ impl App {
 
         // 杀死内存最高的进程
         let mut killed = 0;
-        let mut killed_pids = Vec::new();
+        let mut killed_pids = std::collections::HashSet::new();
 
         for (_idx, proc_info) in sorted_processes.iter().take(kill_count) {
             if let Err(e) = kill_process(proc_info.pid) {
-                eprintln!("Failed to kill process {}: {}", proc_info.pid, e);
+                warn!("无法终止进程 {}: {}", proc_info.pid, e);
             } else {
-                killed_pids.push(proc_info.pid);
+                killed_pids.insert(proc_info.pid);
                 killed += 1;
             }
         }
@@ -595,7 +647,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let gauge = Gauge::default()
         .block(Block::default().title("系统状态").borders(Borders::ALL))
         .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
-        .percent(memory_percent as u16)
+        .percent(memory_percent.min(100.0) as u16)
         .label(format!("{:.1}%", memory_percent));
 
     let sys_chunks = Layout::default()
@@ -654,9 +706,9 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let help_text = match app.state {
         AppState::Normal => vec![
             Line::from(vec![
-                Span::styled("↑/j", Style::default().fg(Color::Cyan)),
+                Span::styled("↑/k", Style::default().fg(Color::Cyan)),
                 Span::raw(" 上 "),
-                Span::styled("↓/k", Style::default().fg(Color::Cyan)),
+                Span::styled("↓/j", Style::default().fg(Color::Cyan)),
                 Span::raw(" 下 "),
                 Span::styled("Enter", Style::default().fg(Color::Cyan)),
                 Span::raw(" 杀死选中 "),
