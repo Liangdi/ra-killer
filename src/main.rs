@@ -1,3 +1,5 @@
+mod i18n;
+
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
@@ -19,33 +21,39 @@ use sysinfo::System;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 
-/// ra-killer: 自动监控并杀死高内存占用的 rust-analyzer 进程
+use i18n::{t, td, DynKey, Key};
+
+/// ra-killer: Auto-monitor and kill high-memory rust-analyzer processes
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// 内存使用阈值 (百分比, 0-100)
+    /// Memory usage threshold (percent, 0-100)
     #[arg(short, long, default_value_t = 85, value_parser = clap::value_parser!(u8).range(1..100))]
     threshold: u8,
 
-    /// 检查间隔 (秒)
+    /// Check interval (seconds)
     #[arg(short, long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(5..3600))]
     interval: u64,
 
-    /// 目标进程名
+    /// Target process name
     #[arg(short, long, default_value = "rust-analyzer")]
     process: String,
 
-    /// 只运行一次检查
+    /// Run check once
     #[arg(long)]
     once: bool,
 
-    /// 启用 TUI 模式
+    /// Enable TUI mode
     #[arg(long)]
     tui: bool,
 
-    /// 详细日志
+    /// Verbose logging
     #[arg(long)]
     verbose: bool,
+
+    /// Language (zh/en/auto)
+    #[arg(long, default_value = "auto")]
+    lang: String,
 }
 
 #[derive(Clone, Copy)]
@@ -54,7 +62,7 @@ enum AppState {
     ConfirmKill(usize),
 }
 
-/// RAII 守卫，确保终端始终恢复到正常状态
+/// RAII guard to ensure terminal is always restored
 struct TuiGuard;
 
 impl Drop for TuiGuard {
@@ -68,7 +76,7 @@ impl Drop for TuiGuard {
     }
 }
 
-/// 运行 TUI 界面
+/// Run TUI interface
 async fn run_tui(args: Args) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -81,15 +89,11 @@ async fn run_tui(args: Args) -> Result<()> {
     let mut last_tick = std::time::Instant::now();
     let tick_rate = Duration::from_millis(250);
 
-    // 处理事件
     while !app.should_quit {
-        // 清理过期消息
         app.clear_expired_message();
 
-        // 绘制界面
         terminal.draw(|f| draw_ui(f, &app))?;
 
-        // 处理输入
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
                 match app.state {
@@ -115,13 +119,16 @@ async fn run_tui(args: Args) -> Result<()> {
                             }
                             KeyCode::Char('r') => {
                                 app.refresh_processes();
-                                app.set_message("🔄 已刷新".to_string());
+                                app.set_message(t(Key::msg_refreshed).to_string());
                             }
                             KeyCode::Char('a') => {
-                                // 杀死所有进程
                                 if !app.processes.is_empty() {
                                     app.state = AppState::ConfirmKill(usize::MAX);
                                 }
+                            }
+                            KeyCode::Char('L') => {
+                                i18n::toggle();
+                                app.set_message(t(Key::msg_lang_switched).to_string());
                             }
                             _ => {}
                         }
@@ -130,13 +137,12 @@ async fn run_tui(args: Args) -> Result<()> {
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Enter => {
                                 if index == usize::MAX {
-                                    // 杀死内存使用最高的 40% 进程
                                     match app.kill_top_memory_processes(40) {
                                         Ok(killed) => {
-                                            app.set_message(format!("✅ 已终止 {} 个进程（内存最高的 40%）", killed));
+                                            app.set_message(td(DynKey::MsgKilledCount(killed)));
                                         }
                                         Err(e) => {
-                                            app.set_message(format!("❌ 终止进程失败: {}", e));
+                                            app.set_message(td(DynKey::MsgKillFailed(e.to_string())));
                                         }
                                     }
                                 } else {
@@ -154,15 +160,13 @@ async fn run_tui(args: Args) -> Result<()> {
             }
         }
 
-        // 自动刷新
+        // Auto refresh
         if last_tick.elapsed() >= Duration::from_secs(args.interval) {
             app.refresh_processes();
-            // 自动阈值检测 + 杀进程（和 CLI 一致）
             if app.memory_percent() >= app.threshold as f64 {
                 match app.auto_kill_high_memory() {
                     Ok(killed) if killed > 0 => {
-                        app.set_message(format!("已自动终止 {} 个高内存进程", killed));
-                        // 刷新系统内存数据，使 Gauge 立即反映变化
+                        app.set_message(td(DynKey::MsgAutoKilled(killed)));
                         app.refresh_processes();
                     }
                     _ => {}
@@ -172,7 +176,6 @@ async fn run_tui(args: Args) -> Result<()> {
         }
     }
 
-    // 恢复终端
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -188,7 +191,14 @@ async fn run_tui(args: Args) -> Result<()> {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // 初始化日志
+    // Initialize i18n
+    if args.lang != "auto" {
+        i18n::init(Some(&args.lang));
+    } else {
+        i18n::init(None);
+    }
+
+    // Initialize logging
     let log_level = if args.verbose {
         tracing::Level::DEBUG
     } else {
@@ -200,25 +210,22 @@ async fn main() -> Result<()> {
     }
 
     if args.tui {
-        // TUI 模式
         return run_tui(args).await;
     }
 
-    // CLI 模式
-    info!("🚀 ra-killer 启动");
-    info!("📊 内存阈值: {}%", args.threshold);
-    info!("⏱️  检查间隔: {} 秒", args.interval);
-    info!("🎯 目标进程: {}", args.process);
+    // CLI mode
+    info!("{}", t(Key::cli_starting));
+    info!("{}", td(DynKey::CliThreshold(args.threshold)));
+    info!("{}", td(DynKey::CliInterval(args.interval)));
+    info!("{}", td(DynKey::CliTarget(args.process.clone())));
 
     let mut sys = System::new_all();
 
     if args.once {
-        // 只运行一次
         run_check(&mut sys, &args);
         return Ok(());
     }
 
-    // 持续监控
     let mut timer = interval(Duration::from_secs(args.interval));
 
     loop {
@@ -228,11 +235,9 @@ async fn main() -> Result<()> {
 }
 
 fn run_check(sys: &mut System, args: &Args) {
-    // 刷新系统信息（只刷新内存和进程，跳过 CPU/磁盘/网络等不需要的数据）
     sys.refresh_memory();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-    // 检查内存使用情况
     let total_memory = sys.total_memory();
     let used_memory = sys.used_memory();
     let memory_usage_percent = if total_memory == 0 {
@@ -242,41 +247,46 @@ fn run_check(sys: &mut System, args: &Args) {
     };
 
     info!(
-        "💾 内存使用: {} / {} ({:.1}%)",
-        format_bytes(used_memory),
-        format_bytes(total_memory),
-        memory_usage_percent
+        "{}",
+        td(DynKey::CliMemoryUsage {
+            used: format_bytes(used_memory),
+            total: format_bytes(total_memory),
+            percent: memory_usage_percent,
+        })
     );
 
-    // 如果内存超过阈值，查找并杀死目标进程
     if memory_usage_percent >= args.threshold as f64 {
         warn!(
-            "⚠️  内存使用率 {:.1}% 超过阈值 {}%",
-            memory_usage_percent, args.threshold
+            "{}",
+            td(DynKey::CliMemoryWarning {
+                percent: memory_usage_percent,
+                threshold: args.threshold,
+            })
         );
 
         match find_and_kill_target_process(sys, &args.process) {
             Some(killed_count) => {
                 if killed_count > 0 {
                     info!(
-                        "✅ 已杀死 {} 个 {} 进程，释放内存",
-                        killed_count, args.process
+                        "{}",
+                        td(DynKey::CliKilledReleased {
+                            count: killed_count,
+                            name: args.process.clone(),
+                        })
                     );
                 } else {
-                    info!("ℹ️  未找到 {} 进程", args.process);
+                    info!("{}", td(DynKey::CliNoProcess(args.process.clone())));
                 }
             }
             None => {
-                error!("❌ 杀死进程时出错");
+                error!("{}", t(Key::cli_kill_error));
             }
         }
     } else {
-        // 即使没超过阈值，也显示当前目标进程的内存使用情况
         show_target_processes(sys, &args.process);
     }
 }
 
-/// 查找匹配目标名称的进程，返回 (pid, 进程引用) 的迭代器
 fn find_matching_processes<'a>(
     sys: &'a System,
     target_name: &str,
@@ -290,8 +300,6 @@ fn find_matching_processes<'a>(
         .collect()
 }
 
-/// 查找并杀死目标进程
-/// 返回 Some(成功杀死的进程数) 或 None(出错)
 fn find_and_kill_target_process(sys: &System, target_name: &str) -> Option<usize> {
     let mut killed_count = 0;
 
@@ -300,16 +308,24 @@ fn find_and_kill_target_process(sys: &System, target_name: &str) -> Option<usize
         let pid_u32 = pid.as_u32();
 
         info!(
-            "🔍 找到 {} 进程: PID={}, 内存={}",
-            target_name,
-            pid_u32,
-            format_bytes(memory_usage)
+            "{}",
+            td(DynKey::CliFoundDetail {
+                name: target_name.to_string(),
+                pid: pid_u32,
+                mem: format_bytes(memory_usage),
+            })
         );
 
         if let Err(e) = kill_process(pid_u32) {
-            warn!("⚠️  无法终止进程 {}: {}", pid_u32, e);
+            warn!(
+                "{}",
+                td(DynKey::CliCannotTerminate {
+                    pid: pid_u32,
+                    error: e.to_string(),
+                })
+            );
         } else {
-            info!("✅ 已终止进程 {}", pid_u32);
+            info!("{}", td(DynKey::CliTerminated(pid_u32)));
             killed_count += 1;
         }
     }
@@ -317,61 +333,57 @@ fn find_and_kill_target_process(sys: &System, target_name: &str) -> Option<usize
     Some(killed_count)
 }
 
-/// 显示目标进程的内存使用情况
 fn show_target_processes(sys: &System, target_name: &str) {
     let mut found = false;
     for (pid, process) in find_matching_processes(sys, target_name) {
         let memory_usage = process.memory();
         let pid_u32 = pid.as_u32();
         info!(
-            "  📋 {} 进程: PID={}, 内存={}",
-            target_name,
-            pid_u32,
-            format_bytes(memory_usage)
+            "{}",
+            td(DynKey::CliProcessDetail {
+                name: target_name.to_string(),
+                pid: pid_u32,
+                mem: format_bytes(memory_usage),
+            })
         );
         found = true;
     }
 
     if found {
-        info!("  💡 提示: 使用 --once 或 -o 参数可以只运行一次检查");
+        info!("{}", t(Key::cli_hint_once));
     }
 }
 
-/// 终止指定进程（先 SIGTERM，等待后 SIGKILL 降级）
 fn kill_process(pid: u32) -> Result<()> {
     use std::process::Command;
     use std::thread;
     use std::time::Duration;
 
-    // 使用 SIGTERM 优雅地终止进程
     let output = Command::new("kill")
         .arg("-15")
         .arg(pid.to_string())
         .output()?;
 
     if !output.status.success() {
-        anyhow::bail!("kill 命令失败: {:?}", output.status);
+        anyhow::bail!("{}: {:?}", t(Key::err_kill_failed), output.status);
     }
 
-    // 等待进程退出
     thread::sleep(Duration::from_millis(500));
 
-    // 检查进程是否仍然存在
     let check = Command::new("kill")
-        .arg("-0")  // kill -0 只检查进程是否存在
+        .arg("-0")
         .arg(pid.to_string())
         .output();
 
     if let Ok(output) = check {
         if output.status.success() {
-            // 进程仍然存在，升级为 SIGKILL
-            warn!("⚠️  进程 {} 未响应 SIGTERM，使用 SIGKILL", pid);
+            warn!("{}", td(DynKey::CliSigtermFailed(pid)));
             let kill_output = Command::new("kill")
                 .arg("-9")
                 .arg(pid.to_string())
                 .output()?;
             if !kill_output.status.success() {
-                anyhow::bail!("SIGKILL 失败: {:?}", kill_output.status);
+                anyhow::bail!("{}: {:?}", t(Key::err_sigkill_failed), kill_output.status);
             }
         }
     }
@@ -379,7 +391,6 @@ fn kill_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
-/// 格式化字节数为可读格式
 fn format_bytes(bytes: u64) -> String {
     const GB: u64 = 1024 * 1024 * 1024;
     const MB: u64 = 1024 * 1024;
@@ -396,7 +407,6 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// 进程信息结构
 struct ProcessInfo {
     pid: u32,
     name: String,
@@ -404,7 +414,6 @@ struct ProcessInfo {
     cpu: f32,
 }
 
-/// TUI 应用状态
 struct App {
     sys: System,
     threshold: u8,
@@ -442,14 +451,11 @@ impl App {
     }
 
     fn refresh_processes(&mut self) {
-        // 只刷新内存和进程，保持 CPU 采样的连续性，跳过不需要的 CPU/磁盘/网络数据
         self.sys.refresh_memory();
         self.sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-        // 清空进程列表
         self.processes.clear();
 
-        // 重新获取进程列表
         for (pid, process) in find_matching_processes(&self.sys, &self.process_name) {
             self.processes.push(ProcessInfo {
                 pid: pid.as_u32(),
@@ -459,7 +465,6 @@ impl App {
             });
         }
 
-        // 调整选中索引
         if self.selected_index >= self.processes.len() && !self.processes.is_empty() {
             self.selected_index = self.processes.len() - 1;
         }
@@ -492,7 +497,7 @@ impl App {
         if self.selected_index < self.processes.len() {
             let pid = self.processes[self.selected_index].pid;
             kill_process(pid)?;
-            self.set_message(format!("✅ 已终止进程 {}", pid));
+            self.set_message(td(DynKey::MsgKilledProcess(pid)));
             self.refresh_processes();
         }
         Ok(())
@@ -503,31 +508,32 @@ impl App {
             return Ok(0);
         }
 
-        // 按内存使用排序（从高到低）
         let mut sorted_processes: Vec<_> = self.processes.iter().enumerate().collect();
         sorted_processes.sort_by(|a, b| b.1.memory.cmp(&a.1.memory));
 
-        // 计算要杀死的进程数量（40%，向上取整）
         let total = self.processes.len();
         let kill_count = (total as f64 * percentage as f64 / 100.0).ceil() as usize;
 
-        // 杀死内存最高的进程
         let mut killed = 0;
         let mut killed_pids = std::collections::HashSet::new();
 
         for (_idx, proc_info) in sorted_processes.iter().take(kill_count) {
             if let Err(e) = kill_process(proc_info.pid) {
-                warn!("无法终止进程 {}: {}", proc_info.pid, e);
+                warn!(
+                    "{}",
+                    td(DynKey::CliCannotTerminate {
+                        pid: proc_info.pid,
+                        error: e.to_string(),
+                    })
+                );
             } else {
                 killed_pids.insert(proc_info.pid);
                 killed += 1;
             }
         }
 
-        // 从进程列表中移除已杀死的进程
         self.processes.retain(|p| !killed_pids.contains(&p.pid));
 
-        // 调整选中索引
         if self.selected_index >= self.processes.len() && !self.processes.is_empty() {
             self.selected_index = self.processes.len() - 1;
         }
@@ -550,26 +556,24 @@ impl App {
     }
 }
 
-/// 绘制 UI
 fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let size = f.area();
 
-    // 主布局
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints(
             [
-                Constraint::Length(3),  // 标题
-                Constraint::Length(9),  // 系统信息
-                Constraint::Min(0),     // 进程列表
-                Constraint::Length(3),  // 帮助信息
+                Constraint::Length(3),
+                Constraint::Length(9),
+                Constraint::Min(0),
+                Constraint::Length(3),
             ]
             .as_ref(),
         )
         .split(size);
 
-    // 标题
+    // Title
     let title = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
@@ -583,7 +587,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         ]),
         Line::from(vec![
             Span::styled(
-                "目标进程: ",
+                t(Key::target_process_label),
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(
@@ -596,7 +600,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     .alignment(Alignment::Center);
     f.render_widget(title, chunks[0]);
 
-    // 系统信息
+    // System info
     let memory_percent = app.memory_percent();
     let gauge_color = if memory_percent >= app.threshold as f64 {
         Color::Red
@@ -608,44 +612,44 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
     let system_info = vec![
         Line::from(vec![
-            Span::styled("💾 内存使用: ", Style::default().fg(Color::Cyan)),
+            Span::styled(t(Key::memory_usage_label), Style::default().fg(Color::Cyan)),
             Span::styled(
                 format!("{} / {}", format_bytes(app.used_memory()), format_bytes(app.total_memory())),
                 Style::default().fg(Color::White),
             ),
         ]),
         Line::from(vec![
-            Span::styled("📊 使用率: ", Style::default().fg(Color::Cyan)),
+            Span::styled(t(Key::usage_label), Style::default().fg(Color::Cyan)),
             Span::styled(
                 format!("{:.1}%", memory_percent),
                 Style::default().fg(gauge_color).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("⚠️  阈值: ", Style::default().fg(Color::Cyan)),
+            Span::styled(t(Key::threshold_label), Style::default().fg(Color::Cyan)),
             Span::styled(
                 format!("{}%", app.threshold),
                 Style::default().fg(Color::Yellow),
             ),
         ]),
         Line::from(vec![
-            Span::styled("🔄 刷新间隔: ", Style::default().fg(Color::Cyan)),
+            Span::styled(t(Key::refresh_interval_label), Style::default().fg(Color::Cyan)),
             Span::styled(
-                format!("{} 秒", app.interval),
+                td(DynKey::RefreshIntervalSecs(app.interval)),
                 Style::default().fg(Color::Gray),
             ),
         ]),
         Line::from(vec![
-            Span::styled("🤖 自动清理: ", Style::default().fg(Color::Cyan)),
+            Span::styled(t(Key::auto_cleanup_label), Style::default().fg(Color::Cyan)),
             Span::styled(
-                "开启 (杀内存最高 40%)",
+                t(Key::auto_cleanup_enabled),
                 Style::default().fg(Color::Green),
             ),
         ]),
     ];
 
     let gauge = Gauge::default()
-        .block(Block::default().title("系统状态").borders(Borders::ALL))
+        .block(Block::default().title(t(Key::system_status)).borders(Borders::ALL))
         .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
         .percent(memory_percent.min(100.0) as u16)
         .label(format!("{:.1}%", memory_percent));
@@ -656,12 +660,12 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .split(chunks[1]);
 
     let sys_info = Paragraph::new(system_info)
-        .block(Block::default().title("系统信息").borders(Borders::ALL))
+        .block(Block::default().title(t(Key::system_info)).borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     f.render_widget(sys_info, sys_chunks[0]);
     f.render_widget(gauge, sys_chunks[1]);
 
-    // 进程列表
+    // Process table
     let rows: Vec<Row> = app
         .processes
         .iter()
@@ -684,56 +688,57 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
     let table = Table::new(rows, [Constraint::Length(8), Constraint::Min(10), Constraint::Length(8), Constraint::Min(0)])
         .header(Row::new(vec![
-            Cell::from("PID").style(Style::default().fg(Color::Cyan)),
-            Cell::from("进程名").style(Style::default().fg(Color::Cyan)),
-            Cell::from("CPU").style(Style::default().fg(Color::Cyan)),
-            Cell::from("内存").style(Style::default().fg(Color::Cyan)),
+            Cell::from(t(Key::pid_header)).style(Style::default().fg(Color::Cyan)),
+            Cell::from(t(Key::process_name_header)).style(Style::default().fg(Color::Cyan)),
+            Cell::from(t(Key::cpu_header)).style(Style::default().fg(Color::Cyan)),
+            Cell::from(t(Key::memory_header)).style(Style::default().fg(Color::Cyan)),
         ]))
         .block(
             Block::default()
-                .title(format!(
-                    "进程列表 - {} ({} 个)",
-                    app.process_name,
-                    app.processes.len()
-                ))
+                .title(td(DynKey::TableTitle {
+                    name: app.process_name.clone(),
+                    count: app.processes.len(),
+                }))
                 .borders(Borders::ALL),
         )
         .widths(&[Constraint::Length(8), Constraint::Min(10), Constraint::Length(8), Constraint::Min(0)]);
 
     f.render_widget(table, chunks[2]);
 
-    // 帮助信息
+    // Help bar
     let help_text = match app.state {
         AppState::Normal => vec![
             Line::from(vec![
                 Span::styled("↑/k", Style::default().fg(Color::Cyan)),
-                Span::raw(" 上 "),
+                Span::raw(t(Key::help_up)),
                 Span::styled("↓/j", Style::default().fg(Color::Cyan)),
-                Span::raw(" 下 "),
+                Span::raw(t(Key::help_down)),
                 Span::styled("Enter", Style::default().fg(Color::Cyan)),
-                Span::raw(" 杀死选中 "),
+                Span::raw(t(Key::help_kill_selected)),
                 Span::styled("a", Style::default().fg(Color::Cyan)),
-                Span::raw(" 清理高内存(40%) "),
+                Span::raw(t(Key::help_kill_high_mem)),
                 Span::styled("r", Style::default().fg(Color::Cyan)),
-                Span::raw(" 刷新 "),
+                Span::raw(t(Key::help_refresh)),
+                Span::styled("L", Style::default().fg(Color::Cyan)),
+                Span::raw(t(Key::help_lang)),
                 Span::styled("q", Style::default().fg(Color::Cyan)),
-                Span::raw(" 退出"),
+                Span::raw(t(Key::help_quit)),
             ]),
         ],
         AppState::ConfirmKill(index) => vec![
             Line::from(vec![
                 Span::styled(
                     if index == usize::MAX {
-                        "确认清理内存最高的 40% 进程? "
+                        t(Key::confirm_cleanup)
                     } else {
-                        "确认杀死选中进程? "
+                        t(Key::confirm_kill_selected)
                     },
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                 ),
                 Span::styled("y", Style::default().fg(Color::Green)),
-                Span::raw(" 是 "),
+                Span::raw(t(Key::confirm_yes)),
                 Span::styled("n", Style::default().fg(Color::Red)),
-                Span::raw(" 否"),
+                Span::raw(t(Key::confirm_no)),
             ]),
         ],
     };
@@ -743,7 +748,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .alignment(Alignment::Center);
     f.render_widget(help, chunks[3]);
 
-    // 显示消息
+    // Floating message
     if let Some(ref msg) = app.message {
         let msg_paragraph = Paragraph::new(msg.as_str())
             .block(Block::default())
