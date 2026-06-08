@@ -1,3 +1,8 @@
+## [0.3.1] - 2026-06-08
+
+### ⚡ Performance
+
+- TUI 模式数据刷新与自动 kill 检测定时器分离，CPU/内存每秒刷新
 ## [0.3.0] - 2026-06-07
 
 ### 🚀 Features
@@ -7,6 +12,10 @@
 ### 🐛 Bug Fixes
 
 - 修复多个 bug 并优化性能
+
+### ⚙️ Miscellaneous Tasks
+
+- Release ra-killer version 0.3.0
 ## [0.2.4] - 2026-05-17
 
 ### 🚀 Features
