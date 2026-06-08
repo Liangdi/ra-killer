@@ -86,8 +86,11 @@ async fn run_tui(args: Args) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(args.threshold, args.interval, args.process.clone());
-    let mut last_tick = std::time::Instant::now();
+    let mut last_data_refresh = std::time::Instant::now();
+    let mut last_auto_kill_check = std::time::Instant::now();
     let tick_rate = Duration::from_millis(250);
+    // Data refresh interval: 1 second for responsive CPU/memory updates
+    let data_refresh_interval = Duration::from_secs(1);
 
     while !app.should_quit {
         app.clear_expired_message();
@@ -160,9 +163,14 @@ async fn run_tui(args: Args) -> Result<()> {
             }
         }
 
-        // Auto refresh
-        if last_tick.elapsed() >= Duration::from_secs(args.interval) {
+        // Refresh process data (CPU/memory) every 3 seconds
+        if last_data_refresh.elapsed() >= data_refresh_interval {
             app.refresh_processes();
+            last_data_refresh = std::time::Instant::now();
+        }
+
+        // Auto kill check runs on the user-configured interval
+        if last_auto_kill_check.elapsed() >= Duration::from_secs(args.interval) {
             if app.memory_percent() >= app.threshold as f64 {
                 match app.auto_kill_high_memory() {
                     Ok(killed) if killed > 0 => {
@@ -172,7 +180,7 @@ async fn run_tui(args: Args) -> Result<()> {
                     _ => {}
                 }
             }
-            last_tick = std::time::Instant::now();
+            last_auto_kill_check = std::time::Instant::now();
         }
     }
 
