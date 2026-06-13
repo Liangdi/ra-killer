@@ -1,4 +1,5 @@
 mod i18n;
+mod theme;
 
 use anyhow::Result;
 use clap::Parser;
@@ -10,9 +11,8 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Table, Wrap},
     Terminal,
 };
 use std::io;
@@ -22,6 +22,7 @@ use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use i18n::{t, td, DynKey, Key};
+use theme::{LoadLevel, Theme};
 
 /// ra-killer: Auto-monitor and kill high-memory rust-analyzer processes
 #[derive(Parser, Debug)]
@@ -86,6 +87,7 @@ async fn run_tui(args: Args) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(args.threshold, args.interval, args.process.clone());
+    let theme = Theme::new()?;
     let mut last_data_refresh = std::time::Instant::now();
     let mut last_auto_kill_check = std::time::Instant::now();
     let tick_rate = Duration::from_millis(250);
@@ -95,7 +97,7 @@ async fn run_tui(args: Args) -> Result<()> {
     while !app.should_quit {
         app.clear_expired_message();
 
-        terminal.draw(|f| draw_ui(f, &app))?;
+        terminal.draw(|f| draw_ui(f, &app, &theme))?;
 
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
@@ -564,8 +566,12 @@ impl App {
     }
 }
 
-fn draw_ui(f: &mut ratatui::Frame, app: &App) {
+fn draw_ui(f: &mut ratatui::Frame, app: &App, theme: &Theme) {
     let size = f.area();
+    let level = LoadLevel::from_percent(app.memory_percent(), app.threshold);
+
+    // Space background fills the whole screen first.
+    f.render_widget(Block::default().style(theme.root().to_style()), size);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -581,193 +587,209 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         )
         .split(size);
 
-    // Title
-    let title = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(
-                "🔫 ra-killer ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("v{}", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(Color::Gray),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                t(Key::target_process_label),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled(
-                &app.process_name,
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-    ])
-    .block(Block::default().borders(Borders::ALL))
-    .alignment(Alignment::Center);
-    f.render_widget(title, chunks[0]);
+    draw_header(f, theme, chunks[0], level);
+    draw_system_info(f, theme, app, chunks[1], level);
+    draw_process_table(f, theme, app, chunks[2]);
+    draw_footer(f, theme, app, chunks[3]);
+    draw_message(f, theme, app, size);
+}
 
-    // System info
-    let memory_percent = app.memory_percent();
-    let gauge_color = if memory_percent >= app.threshold as f64 {
-        Color::Red
-    } else if memory_percent >= app.threshold as f64 * 0.8 {
-        Color::Yellow
-    } else {
-        Color::Green
+fn draw_header(f: &mut ratatui::Frame, theme: &Theme, area: Rect, level: LoadLevel) {
+    let status_word = match level {
+        LoadLevel::Normal => "● ONLINE",
+        LoadLevel::Warn => "● CAUTION",
+        LoadLevel::Alert => "● CRITICAL",
     };
+    let line = Line::from(vec![
+        Span::styled("⟁ ra-killer ", theme.header().to_style()),
+        Span::styled(
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+            theme.subtitle().to_style(),
+        ),
+        Span::raw("    "),
+        Span::styled(status_word, theme.status(level).to_style()),
+    ]);
+    let panel = theme.panel(true);
+    let para = Paragraph::new(line)
+        .alignment(Alignment::Center)
+        .block(panel.to_block());
+    f.render_widget(para, area);
+}
 
-    let system_info = vec![
-        Line::from(vec![
-            Span::styled(t(Key::memory_usage_label), Style::default().fg(Color::Cyan)),
-            Span::styled(
-                format!("{} / {}", format_bytes(app.used_memory()), format_bytes(app.total_memory())),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(t(Key::usage_label), Style::default().fg(Color::Cyan)),
-            Span::styled(
-                format!("{:.1}%", memory_percent),
-                Style::default().fg(gauge_color).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(t(Key::threshold_label), Style::default().fg(Color::Cyan)),
-            Span::styled(
-                format!("{}%", app.threshold),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(t(Key::refresh_interval_label), Style::default().fg(Color::Cyan)),
-            Span::styled(
-                td(DynKey::RefreshIntervalSecs(app.interval)),
-                Style::default().fg(Color::Gray),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(t(Key::auto_cleanup_label), Style::default().fg(Color::Cyan)),
-            Span::styled(
-                t(Key::auto_cleanup_enabled),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-    ];
-
-    let gauge = Gauge::default()
-        .block(Block::default().title(t(Key::system_status)).borders(Borders::ALL))
-        .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
-        .percent(memory_percent.min(100.0) as u16)
-        .label(format!("{:.1}%", memory_percent));
-
+fn draw_system_info(f: &mut ratatui::Frame, theme: &Theme, app: &App, area: Rect, level: LoadLevel) {
     let sys_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
+        .split(area);
 
-    let sys_info = Paragraph::new(system_info)
-        .block(Block::default().title(t(Key::system_info)).borders(Borders::ALL))
+    let label = theme.label().to_style();
+    let plain = theme.value_plain().to_style();
+    let pct_val = theme.value(level).to_style();
+    let bar_fill = theme.bar(level).to_style();
+    let bar_empty = theme.bar_empty().to_style();
+    let ok_val = theme.value(LoadLevel::Normal).to_style();
+
+    let memory_percent = app.memory_percent();
+    let filled = ((memory_percent.min(100.0) / 100.0) * 14.0).round() as usize;
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(format!("{} ", t(Key::target_process_label)), label),
+            Span::styled(app.process_name.as_str(), pct_val),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{} ", t(Key::memory_usage_label)), label),
+            Span::styled(
+                format!(
+                    "{} / {}",
+                    format_bytes(app.used_memory()),
+                    format_bytes(app.total_memory())
+                ),
+                plain,
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{} ", t(Key::usage_label)), label),
+            Span::styled("▰".repeat(filled), bar_fill),
+            Span::styled("▱".repeat(14 - filled), bar_empty),
+            Span::styled(format!(" {:>5.1}%", memory_percent), pct_val),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{} ", t(Key::threshold_label)), label),
+            Span::styled(format!("{}%", app.threshold), plain),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{} ", t(Key::refresh_interval_label)), label),
+            Span::styled(td(DynKey::RefreshIntervalSecs(app.interval)), plain),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{} ", t(Key::auto_cleanup_label)), label),
+            Span::styled(t(Key::auto_cleanup_enabled), ok_val),
+        ]),
+    ];
+
+    let panel = theme.panel(true);
+    let info = Paragraph::new(lines)
+        .block(panel.to_block().title(format!(" ◈ {} ", t(Key::system_info))))
         .wrap(Wrap { trim: true });
-    f.render_widget(sys_info, sys_chunks[0]);
-    f.render_widget(gauge, sys_chunks[1]);
+    f.render_widget(info, sys_chunks[0]);
 
-    // Process table
+    let gauge = Gauge::default()
+        .block(panel.to_block().title(format!(" ◈ {} ", t(Key::system_status))))
+        .gauge_style(theme.bar(level).to_style())
+        .percent(memory_percent.min(100.0) as u16)
+        .label(format!("{:.1}%", memory_percent));
+    f.render_widget(gauge, sys_chunks[1]);
+}
+
+fn draw_process_table(f: &mut ratatui::Frame, theme: &Theme, app: &App, area: Rect) {
+    let th = theme.th_cell().to_style();
     let rows: Vec<Row> = app
         .processes
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let style = if i == app.selected_index {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
             Row::new(vec![
                 Cell::from(format!("{}", p.pid)),
                 Cell::from(p.name.as_str()),
                 Cell::from(format!("{:.1}%", p.cpu)),
                 Cell::from(format_bytes(p.memory)),
             ])
-            .style(style)
+            .style(theme.row(i == app.selected_index).to_style())
         })
         .collect();
 
-    let table = Table::new(rows, [Constraint::Length(8), Constraint::Min(10), Constraint::Length(8), Constraint::Min(0)])
-        .header(Row::new(vec![
-            Cell::from(t(Key::pid_header)).style(Style::default().fg(Color::Cyan)),
-            Cell::from(t(Key::process_name_header)).style(Style::default().fg(Color::Cyan)),
-            Cell::from(t(Key::cpu_header)).style(Style::default().fg(Color::Cyan)),
-            Cell::from(t(Key::memory_header)).style(Style::default().fg(Color::Cyan)),
-        ]))
-        .block(
-            Block::default()
-                .title(td(DynKey::TableTitle {
-                    name: app.process_name.clone(),
-                    count: app.processes.len(),
-                }))
-                .borders(Borders::ALL),
-        )
-        .widths(&[Constraint::Length(8), Constraint::Min(10), Constraint::Length(8), Constraint::Min(0)]);
-
-    f.render_widget(table, chunks[2]);
-
-    // Help bar
-    let help_text = match app.state {
-        AppState::Normal => vec![
-            Line::from(vec![
-                Span::styled("↑/k", Style::default().fg(Color::Cyan)),
-                Span::raw(t(Key::help_up)),
-                Span::styled("↓/j", Style::default().fg(Color::Cyan)),
-                Span::raw(t(Key::help_down)),
-                Span::styled("Enter", Style::default().fg(Color::Cyan)),
-                Span::raw(t(Key::help_kill_selected)),
-                Span::styled("a", Style::default().fg(Color::Cyan)),
-                Span::raw(t(Key::help_kill_high_mem)),
-                Span::styled("r", Style::default().fg(Color::Cyan)),
-                Span::raw(t(Key::help_refresh)),
-                Span::styled("L", Style::default().fg(Color::Cyan)),
-                Span::raw(t(Key::help_lang)),
-                Span::styled("q", Style::default().fg(Color::Cyan)),
-                Span::raw(t(Key::help_quit)),
-            ]),
+    let panel = theme.panel(true);
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Min(10),
+            Constraint::Length(8),
+            Constraint::Min(0),
         ],
-        AppState::ConfirmKill(index) => vec![
-            Line::from(vec![
-                Span::styled(
-                    if index == usize::MAX {
-                        t(Key::confirm_cleanup)
-                    } else {
-                        t(Key::confirm_kill_selected)
-                    },
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                ),
-                Span::styled("y", Style::default().fg(Color::Green)),
-                Span::raw(t(Key::confirm_yes)),
-                Span::styled("n", Style::default().fg(Color::Red)),
-                Span::raw(t(Key::confirm_no)),
-            ]),
-        ],
+    )
+    .header(Row::new(vec![
+        Cell::from(t(Key::pid_header)).style(th),
+        Cell::from(t(Key::process_name_header)).style(th),
+        Cell::from(t(Key::cpu_header)).style(th),
+        Cell::from(t(Key::memory_header)).style(th),
+    ]))
+    .block(panel.to_block().title(format!(
+        " ◎ {} ",
+        td(DynKey::TableTitle {
+            name: app.process_name.clone(),
+            count: app.processes.len(),
+        })
+    )))
+    .widths([
+        Constraint::Length(8),
+        Constraint::Min(10),
+        Constraint::Length(8),
+        Constraint::Min(0),
+    ]);
+    f.render_widget(table, area);
+}
+
+fn draw_footer(f: &mut ratatui::Frame, theme: &Theme, app: &App, area: Rect) {
+    let key = theme.key().to_style();
+    let hint = theme.hint().to_style();
+
+    let lines = match app.state {
+        AppState::Normal => vec![Line::from(vec![
+            Span::styled("↑/k", key),
+            Span::styled(t(Key::help_up), hint),
+            Span::styled("↓/j", key),
+            Span::styled(t(Key::help_down), hint),
+            Span::styled("⏎", key),
+            Span::styled(t(Key::help_kill_selected), hint),
+            Span::styled("a", key),
+            Span::styled(t(Key::help_kill_high_mem), hint),
+            Span::styled("r", key),
+            Span::styled(t(Key::help_refresh), hint),
+            Span::styled("L", key),
+            Span::styled(t(Key::help_lang), hint),
+            Span::styled("q", key),
+            Span::styled(t(Key::help_quit), hint),
+        ])],
+        AppState::ConfirmKill(index) => {
+            let prompt = if index == usize::MAX {
+                t(Key::confirm_cleanup)
+            } else {
+                t(Key::confirm_kill_selected)
+            };
+            vec![Line::from(vec![
+                Span::styled(prompt, theme.confirm().to_style()),
+                Span::styled(" y", key),
+                Span::styled(t(Key::confirm_yes), hint),
+                Span::styled(" n", key),
+                Span::styled(t(Key::confirm_no), hint),
+            ])]
+        }
     };
 
-    let help = Paragraph::new(help_text)
-        .block(Block::default().borders(Borders::ALL))
+    let footer = theme.footer();
+    let para = Paragraph::new(lines)
+        .block(footer.to_block())
         .alignment(Alignment::Center);
-    f.render_widget(help, chunks[3]);
+    f.render_widget(para, area);
+}
 
-    // Floating message
-    if let Some(ref msg) = app.message {
-        let msg_paragraph = Paragraph::new(msg.as_str())
-            .block(Block::default())
-            .alignment(Alignment::Center);
-        let msg_area = Rect {
-            x: size.x + size.width / 4,
-            y: size.y + size.height / 2,
-            width: size.width / 2,
-            height: 3,
-        };
-        f.render_widget(Clear, msg_area);
-        f.render_widget(msg_paragraph, msg_area);
-    }
+fn draw_message(f: &mut ratatui::Frame, theme: &Theme, app: &App, size: Rect) {
+    let Some(msg) = app.message.as_ref() else {
+        return;
+    };
+    let area = Rect {
+        x: size.x + size.width / 8,
+        y: size.y + size.height / 2,
+        width: size.width * 3 / 4,
+        height: 3,
+    };
+    f.render_widget(Clear, area);
+    let computed = theme.msg();
+    let para = Paragraph::new(msg.as_str())
+        .style(computed.to_style())
+        .alignment(Alignment::Center)
+        .block(computed.to_block());
+    f.render_widget(para, area);
 }

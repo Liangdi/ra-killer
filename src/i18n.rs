@@ -116,17 +116,19 @@ pub enum Key {
     err_sigkill_failed,
 }
 
+/// TUI 静态文案。sci-fi HUD 风格不使用 emoji，改用简短遥测式标签；
+/// CLI 相关文案（cli_* / err_*）保留原 emoji 不变。
 pub fn t(key: Key) -> &'static str {
     use Key::*;
     match lang() {
         Lang::Zh => match key {
-            target_process_label => "目标进程: ",
-            memory_usage_label => "💾 内存使用: ",
-            usage_label => "📊 使用率: ",
-            threshold_label => "⚠️  阈值: ",
-            refresh_interval_label => "🔄 刷新间隔: ",
-            auto_cleanup_label => "🤖 自动清理: ",
-            auto_cleanup_enabled => "开启 (杀内存最高 40%)",
+            target_process_label => "目标进程",
+            memory_usage_label => "内存使用",
+            usage_label => "使用率",
+            threshold_label => "阈值",
+            refresh_interval_label => "刷新间隔",
+            auto_cleanup_label => "自动清理",
+            auto_cleanup_enabled => "开启 · 清理内存最高 40%",
             system_status => "系统状态",
             system_info => "系统信息",
             pid_header => "PID",
@@ -144,8 +146,8 @@ pub fn t(key: Key) -> &'static str {
             confirm_kill_selected => "确认杀死选中进程? ",
             confirm_yes => " 是 ",
             confirm_no => " 否",
-            msg_refreshed => "🔄 已刷新",
-            msg_lang_switched => "🌐 语言已切换为中文",
+            msg_refreshed => "» 已刷新",
+            msg_lang_switched => "● 语言已切换为中文",
             cli_starting => "🚀 ra-killer 启动",
             cli_kill_error => "❌ 杀死进程时出错",
             cli_hint_once => "  💡 提示: 使用 --once 或 -o 参数可以只运行一次检查",
@@ -153,19 +155,19 @@ pub fn t(key: Key) -> &'static str {
             err_sigkill_failed => "SIGKILL 失败",
         },
         Lang::En => match key {
-            target_process_label => "Target: ",
-            memory_usage_label => "💾 Memory: ",
-            usage_label => "📊 Usage: ",
-            threshold_label => "⚠️  Threshold: ",
-            refresh_interval_label => "🔄 Refresh: ",
-            auto_cleanup_label => "🤖 Auto Cleanup: ",
-            auto_cleanup_enabled => "On (kill top 40% memory)",
-            system_status => "System Status",
-            system_info => "System Info",
+            target_process_label => "TARGET",
+            memory_usage_label => "MEMORY",
+            usage_label => "USAGE",
+            threshold_label => "THRESHOLD",
+            refresh_interval_label => "REFRESH",
+            auto_cleanup_label => "AUTO CLEANUP",
+            auto_cleanup_enabled => "ON · kill top 40% memory",
+            system_status => "SYSTEM STATUS",
+            system_info => "SYSTEM INFO",
             pid_header => "PID",
-            process_name_header => "Process",
+            process_name_header => "PROCESS",
             cpu_header => "CPU",
-            memory_header => "Memory",
+            memory_header => "MEMORY",
             help_up => " Up ",
             help_down => " Down ",
             help_kill_selected => " Kill Sel ",
@@ -177,8 +179,8 @@ pub fn t(key: Key) -> &'static str {
             confirm_kill_selected => "Confirm kill selected process? ",
             confirm_yes => " Yes ",
             confirm_no => " No",
-            msg_refreshed => "🔄 Refreshed",
-            msg_lang_switched => "🌐 Language switched to English",
+            msg_refreshed => "» Refreshed",
+            msg_lang_switched => "● Language switched to English",
             cli_starting => "🚀 ra-killer started",
             cli_kill_error => "❌ Error killing processes",
             cli_hint_once => "  💡 Tip: Use --once or -o to run a single check",
@@ -218,14 +220,15 @@ pub enum DynKey {
     CliSigtermFailed(u32),
 }
 
+/// TUI 动态消息使用 sci-fi 状态符号（» ● [OK] ✕）；CLI 日志（Cli*）保留 emoji。
 pub fn td(key: DynKey) -> String {
     use DynKey::*;
     match lang() {
         Lang::Zh => match key {
-            MsgKilledCount(n) => format!("✅ 已终止 {} 个进程（内存最高的 40%）", n),
-            MsgKillFailed(e) => format!("❌ 终止进程失败: {}", e),
-            MsgAutoKilled(n) => format!("已自动终止 {} 个高内存进程", n),
-            MsgKilledProcess(pid) => format!("✅ 已终止进程 {}", pid),
+            MsgKilledCount(n) => format!("[OK] 已终止 {} 个进程（内存最高 40%）", n),
+            MsgKillFailed(e) => format!("✕ 终止进程失败: {}", e),
+            MsgAutoKilled(n) => format!("» 已自动终止 {} 个高内存进程", n),
+            MsgKilledProcess(pid) => format!("[OK] 已终止进程 {}", pid),
             TableTitle { name, count } => format!("进程列表 - {} ({} 个)", name, count),
             RefreshIntervalSecs(s) => format!("{} 秒", s),
             CliThreshold(v) => format!("📊 内存阈值: {}%", v),
@@ -256,10 +259,10 @@ pub fn td(key: DynKey) -> String {
             }
         },
         Lang::En => match key {
-            MsgKilledCount(n) => format!("✅ Killed {} processes (top 40% memory)", n),
-            MsgKillFailed(e) => format!("❌ Failed to kill processes: {}", e),
-            MsgAutoKilled(n) => format!("Auto-killed {} high-memory processes", n),
-            MsgKilledProcess(pid) => format!("✅ Terminated process {}", pid),
+            MsgKilledCount(n) => format!("[OK] Killed {} processes (top 40% memory)", n),
+            MsgKillFailed(e) => format!("✕ Failed to kill processes: {}", e),
+            MsgAutoKilled(n) => format!("» Auto-killed {} high-memory processes", n),
+            MsgKilledProcess(pid) => format!("[OK] Terminated process {}", pid),
             TableTitle { name, count } => format!("Processes - {} ({} total)", name, count),
             RefreshIntervalSecs(s) => format!("{}s", s),
             CliThreshold(v) => format!("📊 Memory threshold: {}%", v),
