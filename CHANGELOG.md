@@ -1,8 +1,21 @@
+## [0.3.2] - 2026-06-13
+
+### 🚀 Features
+
+- 重构 TUI 为基于 ratatui-style CSS 的科幻 HUD 风格
+
+### ⚙️ Miscellaneous Tasks
+
+- Update screenshot
 ## [0.3.1] - 2026-06-08
 
 ### ⚡ Performance
 
 - TUI 模式数据刷新与自动 kill 检测定时器分离，CPU/内存每秒刷新
+
+### ⚙️ Miscellaneous Tasks
+
+- Release ra-killer version 0.3.1
 ## [0.3.0] - 2026-06-07
 
 ### 🚀 Features
